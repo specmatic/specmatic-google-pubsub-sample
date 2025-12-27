@@ -20,11 +20,11 @@ jobs:
     steps:
       # checkout to specmatic-google-pubsub-sample project
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with: { fetch-depth: 0 }
 
       - name: Set up JDK ${{ matrix.java }}
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v5
         with:
           distribution: 'oracle'
           java-version: ${{ matrix.java }}
