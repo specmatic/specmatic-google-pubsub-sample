@@ -10,14 +10,8 @@ plugins {
 group = 'com.example'
 version = '0.0.1-SNAPSHOT'
 
-java {
-    sourceCompatibility = '17'
-}
-
 repositories {
-    maven {
-        url "https://repo.specmatic.io/releases"
-    }
+    mavenLocal()
     mavenCentral()
 }
 
@@ -45,6 +39,7 @@ configurations.all {
     exclude group: 'ch.qos.logback', module: 'logback-classic'
     exclude group: 'io.grpc', module: 'grpc-xds' // Exclude problematic gRPC XDS module
 }
+
 tasks.withType(KotlinCompile).configureEach {
     kotlinOptions {
         freeCompilerArgs += '-Xjsr305=strict'
