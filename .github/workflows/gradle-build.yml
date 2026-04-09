@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - wiring-sample-project-on-release
   pull_request:
     branches:
       - main
@@ -18,19 +19,118 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      # checkout to specmatic-google-pubsub-sample project
-      - name: Checkout
-        uses: actions/checkout@v6
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
       - name: Set up JDK ${{ matrix.java }}
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v4
         with:
           distribution: 'oracle'
           java-version: ${{ matrix.java }}
 
-      # Build and test specmatic-google-pubsub-sample project 
-      - name: Grant execute permission for gradlew 
+      - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Build with Gradle
+      - name: Build and Test Enterprise
         run: ./gradlew build
+
+      - name: Trigger Order BFF sample gate after publish
+        if: success() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/main') && matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+
+          VERSION=$(grep -E '^\s*version\s*=' gradle.properties | sed -E 's/^\s*version\s*=\s*//')
+          GROUP_PATH="io/specmatic/enterprise"
+          ARTIFACT_ID="executable"
+          SNAPSHOT_REPO_URL="https://repo.specmatic.io/snapshots"
+          SNAPSHOT_METADATA_URL="${SNAPSHOT_REPO_URL}/${GROUP_PATH}/${ARTIFACT_ID}/${VERSION}/maven-metadata.xml"
+
+          SNAPSHOT_VALUE=""
+          for i in $(seq 1 20); do
+            SNAPSHOT_METADATA=$(curl -sS "${SNAPSHOT_METADATA_URL}" || true)
+            if [ -n "${SNAPSHOT_METADATA}" ]; then
+              SNAPSHOT_VALUE=$(echo "${SNAPSHOT_METADATA}" | tr -d '\n' | sed -nE 's/.*<snapshotVersion><extension>jar<\/extension><value>([^<]+)<\/value>.*/\1/p' | head -n1)
+
+              if [ -z "${SNAPSHOT_VALUE}" ]; then
+                SNAPSHOT_TIMESTAMP=$(echo "${SNAPSHOT_METADATA}" | sed -nE 's/.*<timestamp>([^<]+)<\/timestamp>.*/\1/p' | head -n1)
+                SNAPSHOT_BUILD_NUMBER=$(echo "${SNAPSHOT_METADATA}" | sed -nE 's/.*<buildNumber>([^<]+)<\/buildNumber>.*/\1/p' | head -n1)
+                if [ -n "${SNAPSHOT_TIMESTAMP}" ] && [ -n "${SNAPSHOT_BUILD_NUMBER}" ]; then
+                  SNAPSHOT_VALUE="${VERSION/-SNAPSHOT/}-${SNAPSHOT_TIMESTAMP}-${SNAPSHOT_BUILD_NUMBER}"
+                fi
+              fi
+            fi
+
+            if [ -n "${SNAPSHOT_VALUE}" ]; then
+              break
+            fi
+
+            sleep 5
+          done
+
+          if [ -z "${SNAPSHOT_VALUE}" ]; then
+            echo "Could not resolve timestamped snapshot value from ${SNAPSHOT_METADATA_URL}"
+            exit 1
+          fi
+
+          ENTERPRISE_ARTIFACT_URL="${SNAPSHOT_REPO_URL}/${GROUP_PATH}/${ARTIFACT_ID}/${VERSION}/${ARTIFACT_ID}-${SNAPSHOT_VALUE}.jar"
+          echo "Resolved enterprise artifact URL: ${ENTERPRISE_ARTIFACT_URL}"
+
+          CHECK_RUN_ID=$(curl -sS \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
+            | jq -r '.check_runs[] | select(.name == "Order BFF Sample Gate") | select(.status != "completed") | .id' \
+            | head -n1)
+
+          if [ -z "${CHECK_RUN_ID}" ] || [ "${CHECK_RUN_ID}" = "null" ]; then
+            CHECK_RUN_ID=$(curl -sS -X POST \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/check-runs" \
+              -d '{"name":"Order BFF Sample Gate","head_sha":"'"${GITHUB_SHA}"'","status":"in_progress","details_url":"'"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"'","output":{"title":"Order BFF Sample Gate","summary":"Pending check created by Java build workflow."}}' \
+              | jq -r '.id')
+          fi
+
+          CORRELATION_ID="${GITHUB_SHA}-order-bff-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${{ secrets.SPECMATIC_GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/specmatic/specmatic-order-bff-java/dispatches" \
+            -d '{
+              "event_type": "enterprise_release_gate",
+              "client_payload": {
+                "enterprise_sha": "'"${GITHUB_SHA}"'",
+                "enterprise_check_run_id": "'"${CHECK_RUN_ID}"'",
+                "enterprise_artifact_url": "'"${ENTERPRISE_ARTIFACT_URL}"'",
+                "specmaticEnterpriseVersion": "'"${VERSION}"'",
+                "snapshotRepoUrl": "'"${SNAPSHOT_REPO_URL}"'",
+                "correlation_id": "'"${CORRELATION_ID}"'",
+                "gate_source": "main_push",
+                "callback_repository": "specmatic/enterprise",
+                "callback_event_type": "sample_release_result",
+                "enterprise_run_id": "'"${GITHUB_RUN_ID}"'"
+              }
+            }'
+
+      - name: Fail pending Order BFF sample gate check if Java build failed
+        if: failure() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/main') && matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          
+          CHECK_RUN_ID=$(curl -sS \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
+            | jq -r '.check_runs[] | select(.name == "Order BFF Sample Gate") | select(.status != "completed") | .id' \
+            | head -n1)
+          
+          if [ -z "${CHECK_RUN_ID}" ] || [ "${CHECK_RUN_ID}" = "null" ]; then
+            exit 0
+          fi
+          
+          curl -sS -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/check-runs/${CHECK_RUN_ID}" \
+            -d '{"status":"completed","conclusion":"failure","details_url":"'"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"'","output":{"title":"Order BFF Sample Gate","summary":"Java Build with Gradle failed before sample dispatch."}}'
