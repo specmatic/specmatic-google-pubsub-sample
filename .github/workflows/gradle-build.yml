@@ -19,21 +19,6 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up JDK ${{ matrix.java }}
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'oracle'
-          java-version: ${{ matrix.java }}
-
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
-
-      - name: Build and Test Enterprise
-        run: ./gradlew build
-
       - name: Trigger Order BFF sample gate after publish
         if: success() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/main') && matrix.os == 'ubuntu-latest'
         run: |
@@ -117,20 +102,36 @@ jobs:
         if: failure() && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/main') && matrix.os == 'ubuntu-latest'
         run: |
           set -euo pipefail
-          
+
           CHECK_RUN_ID=$(curl -sS \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
             | jq -r '.check_runs[] | select(.name == "Order BFF Sample Gate") | select(.status != "completed") | .id' \
             | head -n1)
-          
+
           if [ -z "${CHECK_RUN_ID}" ] || [ "${CHECK_RUN_ID}" = "null" ]; then
             exit 0
           fi
-          
+
           curl -sS -X PATCH \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${GITHUB_REPOSITORY}/check-runs/${CHECK_RUN_ID}" \
             -d '{"status":"completed","conclusion":"failure","details_url":"'"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"'","output":{"title":"Order BFF Sample Gate","summary":"Java Build with Gradle failed before sample dispatch."}}'
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'oracle'
+          java-version: ${{ matrix.java }}
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build and Test Enterprise
+        run: ./gradlew build
+
